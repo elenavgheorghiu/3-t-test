@@ -1,0 +1,168 @@
+// Load configuration file
+node(nodename) { ansiColor('vga') {
+    checkout([$class: 'SubversionSCM', locations: [[credentialsId: 'svn', depthOption: 'infinity', ignoreExternalsOption: true, local: '.', remote: svn_url + '/trunk/jenkins' ]], workspaceUpdater: [$class: 'CheckoutUpdater'] ])
+    scm_lib = load "$WORKSPACE/lib/scm.groovy"
+    inputs_lib = load "$WORKSPACE/lib/inputs.groovy"
+    utils_lib = load "$WORKSPACE/lib/utils.groovy"
+    config_lib = load "$WORKSPACE/lib/config.groovy"
+    config_lib.load_configuration()
+    config_lib.load_static_configuration()
+    config_lib.load_extra_configuration()
+    config_lib.display_config_errors_in_build_description()
+    config_lib.fail_if_config_error()
+}}
+pipeline {
+    agent {
+        label nodename
+    }
+    options {
+        skipDefaultCheckout()
+        timestamps()
+        ansiColor('vga')
+    }
+    environment {
+        TERRAFORM_HOME = "/opt/terraform"
+        PATH = "$TERRAFORM_HOME/bin:$PATH"
+        TF_CLI_CONFIG_FILE="/opt/terraform/.terraformrc"
+    }
+    parameters {
+    	choice(name: 'INSTANCE_TYPE', choices: ['app-standalone-oracle', 'app-standalone-postgresql','frontend'], description: 'Instance type selection')
+        string(name: 'INSTANCE_NAME', defaultValue: 'app_INSTANCE', description: '<b style="color:red"><sup>*</sup>(Required)</b> Virtual Machine instance name')
+      	string(name: 'FIXED_IP', defaultValue: '10.10.1.100', description: '<b style="color:red"><sup>*</sup>(Required - Format: 00.00.00.00)</b> Virtual Machine internal IP address')
+      	string(name: 'GATEWAY_IP', defaultValue: '10.10.1.254', description: '<b style="color:red"><sup>*</sup>(Required - Format: 00.00.00.00)</b> Virtual Machine internal IP address')
+      	choice(name: 'app_CUSTO_VERSION', choices: app_custo_versions, description: 'app Customizations version')
+
+        string(name: 'VSPHERE_CENTER', defaultValue: '', description: '<b style="color:red"><sup>*</sup>(Required - Format: 00.00.00.00)</b> Vsphere center IP')
+        string(name: 'VSPHERE_USER', defaultValue: '', description: '<b style="color:red"><sup>*</sup>(Required)</b> Vsphere user ')
+      	password(name: 'VSPHERE_PASSWORD', defaultValue: '', description: '<b style="color:red"><sup>*</sup>(Required)</b> Vsphere password')
+
+        string(name: 'DATASTORE_NAME', defaultValue: '', description: '<b style="color:red"><sup>*</sup>(Required)</b> Vsphere datastore name ')
+        string(name: 'DATACENTER_NAME', defaultValue: '', description: '<b style="color:red"><sup>*</sup>(Required)</b> Vsphere datacenter name ')
+        string(name: 'RESOURCE_POOL_NAME', defaultValue: '', description: '<b style="color:red"><sup>*</sup>(Required)</b> Vsphere resource pool name ')
+        string(name: 'FOLDER_PATH', defaultValue: '', description: '<b style="color:red"><sup>*</sup>(Required)</b> Vsphere folder path')
+        string(name: 'ESXI_IP', defaultValue: '', description: '<b style="color:red"><sup>*</sup>(Required - Format: 00.00.00.00)</b> ESXI IP')
+    	booleanParam (name : 'FORCE_TRUNK_DEPLOYMENT_SCRIPTS', defaultValue: false, description: 'Force use of ansible deployment scripts from trunk instead of tags/branches configured in configuration.groovy')
+    }
+    stages {
+        stage('Validate pipeline parameters') {
+            steps {
+                script {
+                    config_lib.reload_configuration()
+                    inputs_lib.trim("INSTANCE_NAME")
+                    inputs_lib.trim("FIXED_IP")
+                    inputs_lib.trim("GATEWAY_IP")
+                    inputs_lib.trim("VSPHERE_CENTER")
+                    inputs_lib.trim("VSPHERE_USER")
+                    inputs_lib.trim("VSPHERE_PASSWORD")
+                    inputs_lib.trim("DATASTORE_NAME")
+                    inputs_lib.trim("DATACENTER_NAME")
+                    inputs_lib.trim("RESOURCE_POOL_NAME")
+                    inputs_lib.trim("ESXI_IP")
+                    inputs_lib.require("INSTANCE_NAME")
+                    inputs_lib.require("FIXED_IP")
+                    inputs_lib.require("GATEWAY_IP")
+                    inputs_lib.require("VSPHERE_CENTER")
+                    inputs_lib.require("VSPHERE_CENTER")
+                    inputs_lib.require("VSPHERE_PASSWORD")
+                    inputs_lib.require("DATASTORE_NAME")
+                    inputs_lib.require("DATACENTER_NAME")
+                    inputs_lib.require("RESOURCE_POOL_NAME")
+                    inputs_lib.require("ESXI_IP")
+                    inputs_lib.check_ip_format("FIXED_IP")
+                    inputs_lib.check_ip_format("GATEWAY_IP")
+                    inputs_lib.check_ip_format("VSPHERE_CENTER")
+                    inputs_lib.check_ip_format("ESXI_IP")
+                    inputs_lib.fail_if_error()
+                }
+            }
+            post {
+                failure {
+                    script {
+                        inputs_lib.display_errors_in_build_description()
+                    }
+                }
+                success {
+                    script {
+                        currentBuild.description= "<b>Instance type:</b> " + env.INSTANCE_TYPE
+                        currentBuild.description+= "<br><b>Instance name:</b> " +  env.INSTANCE_NAME
+                        currentBuild.description+= "<br><b>Internal IP:</b> " + env.FIXED_IP
+                    }
+                }
+            }
+        }
+        stage('Checkout Terraform scripts') {
+            steps {
+                deleteDir()
+                checkout([$class: 'SubversionSCM',
+                    locations: [[credentialsId: 'svn', depthOption: 'infinity', ignoreExternalsOption: true, local: '.', remote: svn_url + '/' + scm_lib.get_app_custo_version_svn_uri(env.app_CUSTO_VERSION, env.FORCE_TRUNK_DEPLOYMENT_SCRIPTS) + '/scripts' ]], workspaceUpdater: [$class: 'CheckoutUpdater']
+                ])
+            }
+        }
+        stage('Prepare Terraform variables') {
+            steps {
+                script {
+                    wrap([$class: 'MaskPasswordsBuildWrapper', varPasswordPairs: [[var: 'VSPHERE_PASSWORD', password: VSPHERE_PASSWORD]], varMaskRegexes: []]) {
+                        sh """
+                            cd $WORKSPACE/terraform-scripts/app/vsphere
+                            cp variables-${INSTANCE_TYPE}_template.tfvars variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%INSTANCE_NAME%/$INSTANCE_NAME/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%FIXED_IP%/$FIXED_IP/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%GATEWAY_IP%/$GATEWAY_IP/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%DATACENTER_NAME%/$DATACENTER_NAME/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%VM_FOLDER%/$FOLDER_PATH/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%DATASTORE_NAME%/$DATASTORE_NAME/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%ESXI_IP%/$ESXI_IP/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%RC_POOL%/$RESOURCE_POOL_NAME/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%VSPHERE_CENTER%/$VSPHERE_CENTER/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%VSPHERE_USER%/$VSPHERE_USER/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+                            sed -i 's/%VSPHERE_PASSWORD%/$VSPHERE_PASSWORD/' variables-${INSTANCE_TYPE}-jenkins.tfvars
+
+                        """
+                    }
+                }
+            }
+        }
+        stage('Create VM Instance') {
+            steps {
+                sh """
+                    cd $WORKSPACE/terraform-scripts/app/vsphere
+                    terraform init
+                    terraform apply -auto-approve -var-file="variables-${INSTANCE_TYPE}-jenkins.tfvars" -state="./states/terrafom-${INSTANCE_TYPE}-jenkins.tfstate"
+                """
+            }
+            post {
+                success {
+                    dir("$WORKSPACE/terraform-scripts/app/vsphere"){
+                        script {
+                            app_DISK_LINK_PREFIX = "/dev/disk/by-id/scsi-3"
+                            if (params.INSTANCE_TYPE == "app-standalone-oracle") {
+                                database_vg_device = sh (script: """
+                                    terraform show -json "states/terrafom-${INSTANCE_TYPE}-jenkins.tfstate" | jq '.values.root_module.resources[].values | select(.name == "${INSTANCE_NAME}") | .disk[] | select(.label == "ORA") | .uuid' | tr -d '"'| tr -d '-' | tr [:upper:] [:lower:]
+                                """, returnStdout: true).trim()
+                                currentBuild.description+= "<br><b>Database VG device name: </b><b style='color:red'>" + app_DISK_LINK_PREFIX + database_vg_device + "</b>"
+
+                                asm_fra_device = sh (script: """
+                                    terraform show -json "states/terrafom-${INSTANCE_TYPE}-jenkins.tfstate" | jq '.values.root_module.resources[].values | select(.name == "${INSTANCE_NAME}") | .disk[] | select(.label == "FRA") | .uuid' | tr -d '"'| tr -d '-' | tr [:upper:] [:lower:]
+                                """, returnStdout: true).trim()
+                                if (asm_fra_device != "") {
+                                    currentBuild.description+= "<br><b>ASM FRA device name: </b><b style='color:red'>" + app_DISK_LINK_PREFIX + asm_fra_device + "</b>"
+                                }
+
+                                asm_data_device = sh (script: """
+                                    terraform show -json "states/terrafom-${INSTANCE_TYPE}-jenkins.tfstate" | jq '.values.root_module.resources[].values | select(.name == "${INSTANCE_NAME}") | .disk[] | select(.label == "DATA") | .uuid' | tr -d '"'| tr -d '-' | tr [:upper:] [:lower:]
+                                """, returnStdout: true).trim()
+                                currentBuild.description+= "<br><b>ASM DATA device name: </b><b style='color:red'>" + app_DISK_LINK_PREFIX + asm_data_device + "</b>"
+                            }
+                            if (params.INSTANCE_TYPE == "app-standalone-postgresql") {
+                                database_vg_device = sh (script: """
+                                    terraform show -json "states/terrafom-${INSTANCE_TYPE}-jenkins.tfstate" | jq '.values.root_module.resources[].values | select(.name == "${INSTANCE_NAME}") | .disk[] | select(.label == "PSQL") | .uuid' | tr -d '"'| tr -d '-' | tr [:upper:] [:lower:]
+                                """, returnStdout: true).trim()
+                                currentBuild.description+= "<br><b>Database VG device name: </b><b style='color:red'>" + app_DISK_LINK_PREFIX + database_vg_device + "</b>"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
