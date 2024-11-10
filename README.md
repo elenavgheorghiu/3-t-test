@@ -1,8 +1,6 @@
 Scenario: Create VMs on vCenter based on templates
 
-
-
-
+![schema](https://github.com/user-attachments/assets/084a40ed-3962-4e5c-9bff-09b1b2a1e20b)
 
 
 In order to provision Virtual machines from templates on VMWare infrastructure automatically, the following are needed:
@@ -20,5 +18,5 @@ Impossible to use RDM drives with Terraform (LUN mapping directly to VMs, very s
 Impossible to shrink the size of a drive (only increase)
 
 
-PS: In progress …
+PS: In progress â€¦
 
